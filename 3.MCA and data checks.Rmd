@@ -1,0 +1,481 @@
+---
+title: "Validation script"
+author: "Johan Lundin Kleberg"
+date: "2025-05-13"
+output: html_document
+---
+#Description
+
+This R script will 1) run the MCA described in the paper with 3, 4, and 5 factors and compare the effects of the pairwise contrasts reported in figure 4,
+2) plot the number of occurrences of each compositional sound identified in the paper by individual and group, 3) extract the FOCs associated with each factor in the MCA, 
+and for each FOC calculate the proportion of "no" and NAs in the data, and 4) perform the likelihood ratio tests described in the section "(iii) The meaning of AB is derived from the meaning of A and B" while directly testing the significance of the interaction effect.
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+Load necessary libraries
+```{r}
+
+library("FactoMineR")
+library(dplyr)
+library(openxlsx)
+library("factoextra")
+library(vegan)
+library(tidyverse)
+library(cowplot)
+library(colorspace)
+library(ggrepel)
+library(lme4)
+library(DHARMa)
+library(fitdistrplus)
+library("ggpubr")
+library(emmeans)
+library(TSdist)
+library(gtools)
+library(stringr)
+```
+
+## Setup a function  
+
+This function will 1) run the MCA described in Berthet et al 2025, and 2) return the data used to create plot 4 in the published manuscript. The code is adapted so that the numbers of factors in the MCA can be specified by the user. 
+
+```{r}
+xdata1.factor.nr<- function(xdata, n.factors) {
+  
+  res.mca<-MCA(xdata,quanti.sup=c(5,6), quali.sup=c(1:4), ncp = n.factors, graph = TRUE) #Run the MCA. Set 'graph' to TRUE to plot the output
+  #res.mca$eig # Extract the eigenvalues of the first axes
+  
+  
+  results <- catdes(xdata, num.var=1) # Extract the FoCs associated more than expected by chance with each utterance type. 
+  # Plot the MCA results (Figure 1)
+  name <- list(name = levels(xdata$Combination)) # Keep the name of the utterances we want to display on the plot
+  #################################################### Extract distances between utterances ####################################################
+  
+  coord <- as.data.frame(res.mca$quali.sup$coord[1:26,]) # Extract the 5-dimension coordinates of each utterance type
+  distances <- as.matrix(vegdist(coord, method="euclidian")) # Measure the distance between each utterance type
+  
+  # Create a function to assess whether a single call is part of a combination
+  is_in_combination <- function(cri, combination) {
+    cri_parts <- unlist(strsplit(cri, "-"))
+    any(cri_parts %in% unlist(strsplit(combination, "-")))
+  }
+  
+  # Extract, for each possible pair of utterance types of the dataset, the distance between the two utterances and their relationship (the utterances are two single calls, two combinations, or one signal call is a constituent or not of the other combination) 
+  newdata <- data.frame(matrix(nrow = 351))
+  processed_pairs <- list()
+  k=1
+  for (i in 1:nrow(distances)){
+    for (j in 1:ncol(distances)){
+      
+      pair <- sort(c(rownames(distances)[i], colnames(distances)[j]))
+      pair_string <- paste(pair, collapse = "_")
+      if (!(pair_string %in% processed_pairs)) {
+        
+        if ((nchar(rownames(distances)[i])==nchar(colnames(distances)[j])) & (nchar(rownames(distances)[i])==2)) {
+          newdata$dist[k] <- distances[i,j]
+          newdata$call_1[k] <- colnames(distances)[j]
+          newdata$call_2[k] <- rownames(distances)[i]
+          newdata$pair[k] <- pair_string
+          newdata$comb[k] <- "single"
+          k <- k+1
+        } else if ((nchar(rownames(distances)[i])==nchar(colnames(distances)[j])) & (nchar(rownames(distances)[i])==5)) {
+          newdata$dist[k] <- distances[i,j]
+          newdata$call_1[k] <- colnames(distances)[j]
+          newdata$call_2[k] <- rownames(distances)[i]
+          newdata$pair[k] <- pair_string
+          newdata$comb[k] <- "two_comb"
+          k <- k+1
+        } else if (is_in_combination(rownames(distances)[i], colnames(distances)[j])==TRUE) {
+          newdata$dist[k] <- distances[i,j]
+          newdata$call_1[k] <- colnames(distances)[j]
+          newdata$call_2[k] <- rownames(distances)[i]
+          newdata$pair[k] <- pair_string
+          newdata$comb[k] <- "within_comb"
+          k <- k+1
+        } else {
+          newdata$dist[k] <- distances[i,j]
+          newdata$call_1[k] <- colnames(distances)[j]
+          newdata$call_2[k] <- rownames(distances)[i]
+          newdata$pair[k] <- pair_string
+          newdata$comb[k] <- "outside_comb"
+          k <- k+1
+        }
+        processed_pairs <- c(processed_pairs, pair_string) # To keep track of which pairs have been processed already
+      }
+    }
+  }
+  
+  ############################## The meaning of AB is derived from the meaning of A and B  ###################
+  
+  
+  xdata_1 <- rbind(newdata[which(newdata$comb=="within_comb"),], newdata[which(newdata$comb=="outside_comb"),]) # Substract the dataset and keep all the pairs one combination - one single type
+  xdata_1$comb <- as.factor(xdata_1$comb)
+  xdata_1$pair <- as.factor(xdata_1$pair)
+  
+  # Indicate, for each pair, the name of the combination type
+  xdata_1$comb2 <- apply(xdata_1, 1, function(row) {
+    if(nchar(row["call_1"]) > nchar(row["call_2"])) {
+      return(row["call_1"])
+    } else {return(row["call_2"])}
+  })
+  xdata_1$comb2 <- as.factor(xdata_1$comb2)
+  
+  out <- list()
+  out[["xdata_1"]] <- xdata_1
+  out[["results"]] <- results #FCAs associated with each utterance type
+  
+  return(out)
+  
+}
+```
+
+## Load the data
+
+```{r}
+
+#Load data
+xdata <- read.delim("xdata.txt", header=TRUE, stringsAsFactors = TRUE)
+xdata <- xdata[,-c(1)] # For clearer results, we remove the recording names from the analysis
+```
+
+
+## Run the analysis with a MCA with 4 factors. This results in 2 instead of 4 significant contrasts
+```{r}
+
+#Number of factors
+n.factors <- 4
+dat <- xdata1.factor.nr(xdata, n.factors = n.factors)
+
+# Create the full model and check model assumptions
+model1 <- lm(dist~comb*comb2, data=dat[["xdata_1"]])
+
+model1_emm <- emmeans(model1, pairwise~comb|comb2) # Post hoc analysis: which combination is closer to its constituting calls than to other single calls of the repertoire
+
+# Plot the results (Figure 4)
+d <- as.data.frame(model1_emm$emmeans)
+e <- as.data.frame(model1_emm$contrasts)
+
+#ADD A COLUMN WITH ADJUSTED P-VALUES FOR COMPARISION. THIS REDUCES THE NUMBER OF SIGNIFICANT CONTRASTS 
+e$p.value.adj <- p.adjust(e$p.value, method = "fdr")
+
+e_4factors <- e #Save for comparisons with other analyses
+
+# Plot unadjusted p-values as in the manuscript. Change to
+# p.value.variable <- "p.adjust" #to plot adjusted p-values instead
+p.value.variable <- "p.value"
+
+
+significant_contrasts <- e[e[[p.value.variable]] < 0.05,]
+
+#Create a label with stars corresponding to p-value to use in plot 4
+star.labels <- array(dim = nrow(significant_contrasts))
+star.labels[significant_contrasts[[p.value.variable]]< 0.05] <- "*"
+star.labels[significant_contrasts[[p.value.variable]]< 0.01] <- "**"
+star.labels[significant_contrasts[[p.value.variable]]< 0.001] <- "***"
+
+
+
+#Adjusted code for plot 4 which adapts to differences in number of significant contrasts
+fig4 <- ggplot(d, aes(x = comb2, y = emmean)) +
+  geom_point(aes(color = comb), position = position_dodge(width = 0.45), size = 3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL, color = comb), position = position_dodge(width = 0.45), width = 0.25) +
+  labs(x = "", y = "Euclidean distance", fill = "") +
+  scale_color_manual(name=NULL, values = c("#CC79A7","#56B4E9"), label=c("Outside", "Within")) +
+  scale_x_discrete(name="", labels=c("Grunt_Yelp", "High-hoot_Low-hoot", "High-hoot_Peep-yelp", "Low-hoot_High-hoot", "Peep_Grunt", "Peep_Peep-yelp", "Peep_Whistle", "Peep_Yelp", "Peep-yelp_Grunt", "Peep-yelp_High-hoot", "Peep-yelp_Peep", "Peep-yelp_Whistle", "Peep-yelp_Yelp", "Whistle_High-hoot", "Whistle_Peep", "Whistle_Peep-yelp", "Yelp_Grunt", "Yelp_Peep", "Yelp_Peep-yelp"))+
+  geom_text(aes(x = comb2, y = 1.7), data=significant_contrasts, label = star.labels, size=7)+
+  theme_minimal_hgrid(12, rel_small = 1)+
+  theme(
+    legend.position = "right",
+    legend.justification = "right",
+    legend.text = element_text(size = 9),
+    legend.box.spacing = unit(0, "pt"), axis.text.x = element_text(angle = 45, hjust = 1, size=9)
+  )
+title <- paste0("Significant Contrasts (", n.factors, " MCA factors)")
+fig4 <- fig4 + ggtitle(title)+ theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+
+print(fig4)
+
+```
+
+## Print estimated marginal means (including undadjusted and adjusted p-values) for an analysis with 4 factors
+```{r}
+
+print(e)
+
+```
+
+
+
+## Run the analysis with a MCA with 3 factors.
+Of the 4 combinations described as compositional in the paper, two emerge.
+```{r}
+
+#Number of factors
+n.factors <- 3
+dat <- xdata1.factor.nr(xdata, n.factors = n.factors)
+
+# Create the full model and check model assumptions
+model1 <- lm(dist~comb*comb2, data=dat[["xdata_1"]])
+
+model1_emm <- emmeans(model1, pairwise~comb|comb2) # Post hoc analysis: which combination is closer to its constituting calls than to other single calls of the repertoire
+
+# Plot the results (Figure 4)
+d <- as.data.frame(model1_emm$emmeans)
+e <- as.data.frame(model1_emm$contrasts)
+
+#ADD A COLUMN WITH ADJUSTED P-VALUES FOR COMPARISION. THIS REDUCES THE NUMBER OF SIGNIFICANT CONTRASTS 
+e$p.value.adj <- p.adjust(e$p.value, method = "fdr")
+
+e_3factors <- e #Save for comparisons with other analyses
+
+
+# Plot unadjusted p-values as in the manuscript. Change to
+# p.value.variable <- "p.adjust" #to plot adjusted p-values instead
+p.value.variable <- "p.value"
+
+
+significant_contrasts <- e[e[[p.value.variable]] < 0.05,]
+
+#Create a label with stars corresponding to p-value to use in plot 4
+star.labels <- array(dim = nrow(significant_contrasts))
+star.labels[significant_contrasts[[p.value.variable]]< 0.05] <- "*"
+star.labels[significant_contrasts[[p.value.variable]]< 0.01] <- "**"
+star.labels[significant_contrasts[[p.value.variable]]< 0.001] <- "***"
+
+
+
+#Adjusted code for plot 4 which adapts to differences in number of significant contrasts
+fig4 <- ggplot(d, aes(x = comb2, y = emmean)) +
+  geom_point(aes(color = comb), position = position_dodge(width = 0.45), size = 3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL, color = comb), position = position_dodge(width = 0.45), width = 0.25) +
+  labs(x = "", y = "Euclidean distance", fill = "") +
+  scale_color_manual(name=NULL, values = c("#CC79A7","#56B4E9"), label=c("Outside", "Within")) +
+  scale_x_discrete(name="", labels=c("Grunt_Yelp", "High-hoot_Low-hoot", "High-hoot_Peep-yelp", "Low-hoot_High-hoot", "Peep_Grunt", "Peep_Peep-yelp", "Peep_Whistle", "Peep_Yelp", "Peep-yelp_Grunt", "Peep-yelp_High-hoot", "Peep-yelp_Peep", "Peep-yelp_Whistle", "Peep-yelp_Yelp", "Whistle_High-hoot", "Whistle_Peep", "Whistle_Peep-yelp", "Yelp_Grunt", "Yelp_Peep", "Yelp_Peep-yelp"))+
+  geom_text(aes(x = comb2, y = 1.7), data=significant_contrasts, label = star.labels, size=7)+
+  theme_minimal_hgrid(12, rel_small = 1)+
+  theme(
+    legend.position = "right",
+    legend.justification = "right",
+    legend.text = element_text(size = 9),
+    legend.box.spacing = unit(0, "pt"), axis.text.x = element_text(angle = 45, hjust = 1, size=9)
+  )
+title <- paste0("Significant Contrasts (", n.factors, " MCA factors)")
+fig4 <- fig4 + ggtitle(title)+ theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+
+print(fig4)
+
+```
+
+
+
+## Run the analysis with a MCA with 5 factors (as in the manuscript)
+```{r}
+
+#Number of factors
+n.factors <- 5
+dat <- xdata1.factor.nr(xdata, n.factors = n.factors)
+
+# Create the full model and check model assumptions
+model1 <- lm(dist~comb*comb2, data=dat[["xdata_1"]])
+
+model1_emm <- emmeans(model1, pairwise~comb|comb2) # Post hoc analysis: which combination is closer to its constituting calls than to other single calls of the repertoire
+
+# Plot the results (Figure 4)
+d <- as.data.frame(model1_emm$emmeans)
+e <- as.data.frame(model1_emm$contrasts)
+
+#ADD A COLUMN WITH ADJUSTED P-VALUES FOR COMPARISION. THIS REDUCES THE NUMBER OF SIGNIFICANT CONTRASTS 
+e$p.value.adj <- p.adjust(e$p.value, method = "fdr")
+
+e_5factors <- e #Save for comparisons with other analyses
+
+
+# Plot unadjusted p-values as in the manuscript. Change to
+# p.value.variable <- "p.adjust" #to plot adjusted p-values instead
+p.value.variable <- "p.value"
+
+
+significant_contrasts <- e[e[[p.value.variable]] < 0.05,]
+
+#Create a label with stars corresponding to p-value to use in plot 4
+star.labels <- array(dim = nrow(significant_contrasts))
+star.labels[significant_contrasts[[p.value.variable]]< 0.05] <- "*"
+star.labels[significant_contrasts[[p.value.variable]]< 0.01] <- "**"
+star.labels[significant_contrasts[[p.value.variable]]< 0.001] <- "***"
+
+
+
+#Adjusted code for plot 4 which adapts to differences in number of significant contrasts
+fig4 <- ggplot(d, aes(x = comb2, y = emmean)) +
+  geom_point(aes(color = comb), position = position_dodge(width = 0.45), size = 3) +
+  geom_errorbar(aes(ymin = lower.CL, ymax = upper.CL, color = comb), position = position_dodge(width = 0.45), width = 0.25) +
+  labs(x = "", y = "Euclidean distance", fill = "") +
+  scale_color_manual(name=NULL, values = c("#CC79A7","#56B4E9"), label=c("Outside", "Within")) +
+  scale_x_discrete(name="", labels=c("Grunt_Yelp", "High-hoot_Low-hoot", "High-hoot_Peep-yelp", "Low-hoot_High-hoot", "Peep_Grunt", "Peep_Peep-yelp", "Peep_Whistle", "Peep_Yelp", "Peep-yelp_Grunt", "Peep-yelp_High-hoot", "Peep-yelp_Peep", "Peep-yelp_Whistle", "Peep-yelp_Yelp", "Whistle_High-hoot", "Whistle_Peep", "Whistle_Peep-yelp", "Yelp_Grunt", "Yelp_Peep", "Yelp_Peep-yelp"))+
+  geom_text(aes(x = comb2, y = 1.7), data=significant_contrasts, label = star.labels, size=7)+
+  theme_minimal_hgrid(12, rel_small = 1)+
+  theme(
+    legend.position = "right",
+    legend.justification = "right",
+    legend.text = element_text(size = 9),
+    legend.box.spacing = unit(0, "pt"), axis.text.x = element_text(angle = 45, hjust = 1, size=9)
+  )
+title <- paste0("Significant Contrasts (", n.factors, " MCA factors)")
+fig4 <- fig4 + ggtitle(title)+ theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+
+print(fig4)
+
+```
+
+
+
+## Run statistical analyses with data from the five factor MCA
+
+# Step 1: Run the full interaction model (main and interaction effects) 
+```{r}
+model1 <- lm(dist~comb*comb2, data=dat[["xdata_1"]])
+
+
+```
+
+
+# Step 1: Compare this to an intercept only model. 
+```{r}
+
+model_null <- lm(dist~1, data=dat[["xdata_1"]]) # Create a null model and compare it to the full model using a likelihood ratio test 
+
+anova(model1, model_null) # The difference if significative
+
+
+```
+
+# Step 2: Compare the full model to alternative models. 
+
+First, as in the paper, compare to model_comb which only includes a main effect of "comb" meaning that 
+distance depends on whether the two calls were made together or on separate occasions. Note that this comparison does not compare the full model to the next most complex model since mod_comb does not include a main effect of call. The analysis yields a significant effect but does not test the interaction shown in Figure 4
+
+```{r}
+# Create two reduced models and compare them to the full model using a likelihood ratio test
+model_comb <- lm(dist~comb, data=dat[["xdata_1"]]) 
+anova(model_comb, model1) # The difference is significative
+
+model_comb2 <- lm(dist~comb2, data=dat[["xdata_1"]])
+anova(model_comb2, model1) # The difference is significative - this is the model reported 
+
+```
+
+Second, as in the paper, compare to model_comb which only includes a main effect of "comb2" meaning that 
+distance depends on the type of call. Note that this comparison does not compare the full model to the next most complex model since mod_comb does not include a main effect of "comb" (i.e, whether the distance is calculated within or between pairs). The analysis yields a significant effect but does not test the interaction shown in Figure 4
+
+```{r}
+# Create two reduced models and compare them to the full model using a likelihood ratio test
+
+model_comb2 <- lm(dist~comb2, data=dat[["xdata_1"]])
+anova(model_comb2, model1) # The difference is significative - this is the model reported 
+
+```
+
+
+Now, compare the full model to the next most complex model with a likelihood ratio test. This is the standard way to test whether the interaction effect is significant.
+The interaction effect is not significant,
+
+```{r}
+# Create two reduced models and compare them to the full model using a likelihood ratio test
+
+model_without_interactions <- lm(dist~comb2+comb, data=dat[["xdata_1"]])
+anova(model_without_interactions, model1) # The difference is significative - this is the model reported 
+
+```
+
+
+# Plot the occurrences of call combinations identified as compositional (present in the data frame "significant_contrasts).
+Examples of call combinations claimed to be compositional are very rare in the data set. Very few individuals produce them on more than one occasion.
+
+Note that only "pe-wi" "ye-gr" give significant results across analyses run with 3, 4, and 5 factor MCAs. "ye-gr" is the only call with a significant distance difference from its constituents outside the combination with a liberal correction for multiple comparisons in the 5 factor analysis.
+
+```{r, fig.width=15, fig.height=5}
+# Read the data again to access the 'Recording' variable
+xdata2 <- read.delim("xdata.txt", header=TRUE, stringsAsFactors = TRUE)
+xdata2$day <- substr(x = xdata2$Recording, start = 1, stop = 8)
+xdata2$group_day <- paste0(xdata2$Group, xdata$day)
+targets <- significant_contrasts$comb2
+
+
+total.target.occurences <- filter(xdata2, Combination %in% targets) %>% group_by(Combination) %>% summarize(n = n())
+
+total.occurences <- xdata2 %>% group_by(Combination) %>% summarize(n = n())
+total.by.id <- xdata2 %>% group_by(Caller) %>% summarize(n = n())
+
+
+target.data <- filter(xdata2, Combination %in% targets)
+
+title <- paste0("Number of call combinations")
+observed.calls.plot <- ggplot(target.data, aes(x = Caller, fill = day)) +geom_bar() + 
+  facet_wrap(vars(Combination), ncol = 1)+ scale_y_continuous(limits = c(0,4))+
+  ggtitle(title) + theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+
+print(observed.calls.plot)
+```
+## Extract factor loadings by FOC
+
+# Run the MCA with 5 factors. Extract factor loadings. For each FOC, calculate the proportion of "no" responses and the proportion of NAs.
+```{r}
+#Run the MCA with 5 factors. Incpet the factor loadings
+res.mca<-MCA(xdata,quanti.sup=c(5,6), quali.sup=c(1:4), ncp = 5, graph = FALSE) #Run the MCA. Set 'graph' to TRUE to plot the output
+
+contrib <- res.mca[["var"]][["contrib"]]
+contrib <- round(contrib,2)
+factor.belonging <- max.col(contrib)
+
+foc <- row.names(contrib)
+foc.contrib <- data.frame(contrib)
+foc.contrib$factor.belonging <- factor.belonging
+foc.contrib$foc <- foc
+foc.contrib$item <- gsub("_yes", "", foc.contrib$foc)
+foc.contrib$item <- gsub("_no", "", foc.contrib$item)
+foc.contrib$item <- gsub(".NA", "", foc.contrib$item)
+foc.contrib$proportion.no <- NA
+foc.contrib$proportion.na <- NA
+foc.contrib$n.levels<- NA
+
+
+
+#Remove row names 
+row.names(foc.contrib) <- NULL
+
+
+#For each "item"/foc - save the proportion of NAs, proportion of no:s, and the number of levels in the factor (1 means that only one answer + possibly NAs was founf)
+for (this.item in unique(foc.contrib$item)){
+  foc.contrib$proportion.no[foc.contrib$item == this.item] <- mean(xdata[[this.item]] == "no", na.rm =T)
+  foc.contrib$proportion.na[foc.contrib$item == this.item] <- mean(is.na(xdata[[this.item]]))
+  foc.contrib$n.levels[foc.contrib$item == this.item] <- length(levels(xdata[[this.item]]))
+  
+  
+}
+
+foc.contrib$proportion.no <- round(foc.contrib$proportion.no,2)
+
+
+
+
+
+
+```
+
+
+#Incpect the FOCs associated with factor 5
+The items most closely linked to factor 5 have a proportion of "no" answers close to one or one.
+
+```{r}
+foc.contrib <- foc.contrib[order(foc.contrib$Dim.5, decreasing = TRUE),]
+foc.contrib[foc.contrib$factor.belonging == 5,]
+
+```
+
+
+
