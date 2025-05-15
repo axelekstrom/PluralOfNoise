@@ -16,6 +16,17 @@ This version uses the same randomization method as Random', drawing from a binom
 
 _3 MCA_factors.Rmd_
 
+This script 
+
+(1) runs the MCA described in the paper with 3, 4, and 5 factors and compare the effects of the pairwise contrasts reported in Figure 4 in Berthet et al., 
+
+(2) plot the number of occurrences of each compositional sound identified in the paper by individual and group, 
+
+(3) extract the FOCs associated with each factor in the MCA, and for each FOC calculate the proportion of "no"'s and NAs in the data, and 
+
+(4) perform the likelihood ratio tests described in the section "(iii) The meaning of AB is derived from the meaning of A and B" (Berthet et al., 2025) while directly testing the significance of the interaction effect.
+
+
 **Contributors**
 
 Andreas Wartel (Centre for Cultural Evolution, Department of Psychology, Stockholm University) wrote Scripts 1-2.
