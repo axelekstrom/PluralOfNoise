@@ -19,6 +19,7 @@ _3 MCA_factors.Rmd_
 **Contributors**
 
 Andreas Wartel (Centre for Cultural Evolution, Department of Psychology, Stockholm University) wrote Scripts 1-2.
+
 Johan L. Kleberg (Department of Psychology, Stockholm University) wrote Script 3. 
 
 **References:**
